@@ -234,6 +234,7 @@ def generate_config(event, template_path=None, output_dir="config"):
             "depth_km": round(event["depth_km"], 1),
             "magnitude": round(event["magnitude"], 1),
             "origin_time": event["time"][:19],
+            "description": event.get("description", ""),
         },
         "time_window": {
             "pre_event_seconds": 60,

@@ -431,42 +431,32 @@ def compute_distance_azimuth(lat1, lon1, lat2, lon2):
 
 def compute_travel_times(dist_deg, depth_km):
     """
-    Compute approximate travel times for major seismic phases.
-
-    Uses ObsPy's TauPyModel if available, otherwise falls back to
-    simple approximations.
+    Compute travel times for major seismic phases using ObsPy TauPy (iasp91).
 
     Returns dict: {phase_name: travel_time_seconds}
     """
+    tt = {}
     try:
         from obspy.taup import TauPyModel
         model = TauPyModel(model="iasp91")
         arrivals = model.get_travel_times(
             source_depth_in_km=depth_km,
             distance_in_degree=dist_deg,
-            phase_list=["P", "S", "SS", "ScS", "PKP", "Rayleigh"],
+            phase_list=["P", "pP", "S", "sS", "SS", "ScS", "PKP", "PKIKP",
+                         "SKS", "PP", "PcP"],
         )
-        tt = {}
         for arr in arrivals:
             if arr.name not in tt:  # Keep first arrival per phase
                 tt[arr.name] = arr.time
-        # Estimate Rayleigh wave (R1) at ~4 km/s
-        dist_km = dist_deg * 111.195
-        tt["R1"] = dist_km / 4.0
-        return tt
-    except Exception:
-        # Fallback approximations
-        tt = {}
-        if dist_deg < 100:
-            tt["P"] = dist_deg * 9.5 + 100 if dist_deg > 30 else dist_deg * 13
-            tt["S"] = tt["P"] * 1.75
-            tt["SS"] = tt["S"] * 1.4
-        else:
-            tt["P"] = dist_deg * 8.5 + 200
-            tt["S"] = tt["P"] * 1.75
-        dist_km = dist_deg * 111.195
-        tt["R1"] = dist_km / 4.0
-        return tt
+    except Exception as e:
+        print(f"  Warning: TauPy travel time computation failed: {e}")
+
+    # Rayleigh wave R1 estimated at ~4 km/s surface wave speed
+    # This is a group velocity approximation, not from TauPy
+    r_slowness = 28.5  # seconds per degree (matches IRIS GMV default)
+    tt["R1"] = dist_deg * r_slowness
+
+    return tt
 
 
 def create_animation(stream, raw_stream, filt_stream, station_info, config):
@@ -629,12 +619,15 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         zorder=20,
     )
 
-    # Main title - formatted as requested
+    # Main title
     origin_dt = origin.strftime("%Y-%m-%d")
-    event_desc = map_cfg.get("title", "").replace("GEONAT Array - ", "")
+    event_desc = eq.get("description", "")
+    title_line2 = f"{origin_dt} — M{eq['magnitude']}"
+    if event_desc:
+        title_line2 += f" — {event_desc}"
     fig.suptitle(
         f"Ground Motion Visualization\n"
-        f"{origin_dt} — {event_desc} — M{eq['magnitude']}\n"
+        f"{title_line2}\n"
         f"Origin Time (OT) = {eq['origin_time']} UTC | "
         f"Lat {eq['latitude']:.2f}° Lon {eq['longitude']:.2f}° "
         f"Depth {eq['depth_km']:.0f} km",
@@ -748,6 +741,14 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         cursor_label.set_position((elapsed, max_amp * 0.85))
         cursor_label.set_text(ot_str)
 
+        # Progress bar
+        pct = (frame_idx + 1) / n_frames * 100
+        bar_len = 40
+        filled = int(bar_len * (frame_idx + 1) / n_frames)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        print(f"\r  [{bar}] {pct:5.1f}% ({frame_idx+1}/{n_frames}) {ot_str}",
+              end="", flush=True)
+
         return scatter, time_text, cursor_line, cursor_label
 
     print(f"Creating animation with {n_frames} frames...")
@@ -797,6 +798,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         output_file = f"{output_path}.gif"
         anim.save(output_file, writer=writer)
 
+    print()  # Newline after progress bar
     plt.close(fig)
     print(f"Animation saved to: {output_file}")
     return output_file
