@@ -1,0 +1,86 @@
+# Ground Motion Visualization Configuration
+# ==========================================
+
+# Earthquake parameters
+earthquake:
+  latitude: 38.0      # Event latitude (degrees)
+  longitude: 142.0    # Event longitude (degrees)
+  depth_km: 30.0      # Event depth (km)
+  magnitude: 7.0      # Event magnitude
+  origin_time: "2026-09-10T12:00:00"  # UTC origin time
+
+# Time window for waveform extraction (relative to origin time)
+time_window:
+  pre_event_seconds: 60       # Seconds before origin time
+  post_event_seconds: 3600    # Seconds after origin time (adjust for distance)
+
+# Data paths
+data:
+  # MiniSEED directories (list of directories to search)
+  mseed_dirs:
+    - /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/miniseed_5Hz
+    - /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/miniseed_2Hz
+
+  # Station coordinates CSV (must have: serial_number, longitude, latitude, station columns)
+  station_csv: /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/geonat_mseed.csv
+
+  # Instrument response files (RESP format)
+  # Map sensor types to their RESP files. Sensor type is determined from serial number prefix.
+  # Instrument response files (RESP or PZ format)
+  # Map sensor serial number prefix to response file
+  resp_files:
+    "4530": /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/RESP/smartsolo.5Hz.pz
+    "4236": /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/RESP/smartsolo.2Hz.pz
+
+# Processing parameters
+processing:
+  channel: DPZ                # Channel to use (DPZ = vertical)
+  output_units: VEL           # Output units after response removal: VEL, DISP, or ACC
+  filter:
+    type: bandpass             # Filter type: bandpass, lowpass, highpass
+    freqmin: 0.01              # Minimum frequency (Hz)
+    freqmax: 0.1               # Maximum frequency (Hz) - adjust based on event distance/magnitude
+    corners: 4                 # Number of filter corners
+    zerophase: true            # Zero-phase filtering
+  decimate_factor: 50          # Decimation factor (250 Hz / 50 = 5 Hz output, cascaded automatically)
+  normalize: true              # Normalize each trace to its absolute maximum
+  pre_filter:                  # Pre-filter for response removal (corner frequencies in Hz)
+    - 0.005
+    - 0.01
+    - 0.4
+    - 0.5
+
+# Animation parameters
+animation:
+  time_step: 2.0               # Time step between frames (seconds)
+  fps: 15                      # Frames per second in output video
+  dpi: 150                     # Figure resolution
+  format: gif                  # Output format: gif or mp4 (mp4 requires ffmpeg)
+  output_file: output/gmv_animation  # Output path (extension added automatically)
+
+  # Map settings
+  map:
+    projection: PlateCarree    # Cartopy projection
+    extent_pad: 0.05           # Padding around station extent (degrees)
+    background: terrain        # Map background: terrain, satellite, or plain
+    title: "Ground Motion Visualization - GEONAT SmartSolo Array"
+
+  # Marker settings
+  marker:
+    size: 40                   # Marker size
+    alpha: 0.85                # Marker transparency
+    cmap: bwr                  # Colormap: bwr (blue-white-red)
+    vmin: -1.0                 # Color scale min (for normalized data)
+    vmax: 1.0                  # Color scale max
+
+  # Earthquake epicenter marker
+  # Reference trace (bottom panel with red cursor)
+  reference_trace:
+    station: null           # Station code for reference trace (null = auto-select center)
+
+  epicenter:
+    show: true
+    marker: "*"
+    size: 200
+    color: gold
+    edgecolor: black
