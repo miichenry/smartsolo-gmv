@@ -1,0 +1,66 @@
+# M6.5 Indonesia Earthquake - 2026-09-11
+# 121 km NNE of Teluknaga, Indonesia, depth 372 km
+# Epicentral distance to GEONAT array: ~95 degrees
+# Expected P-wave arrival: ~T+780s, S-wave: ~T+1440s
+
+earthquake:
+  latitude: -5.0271
+  longitude: 106.8682
+  depth_km: 372.0
+  magnitude: 6.5
+  origin_time: "2026-09-11T21:23:55"
+
+time_window:
+  pre_event_seconds: 60
+  post_event_seconds: 2400   # 40 minutes to capture P, S, and surface waves
+
+data:
+  mseed_dirs:
+    - /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/miniseed_5Hz
+    - /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/miniseed_2Hz
+  station_csv: /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/geonat_mseed.csv
+  resp_files:
+    "4530": /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/RESP/smartsolo.5Hz.pz
+    "4236": /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/RESP/smartsolo.2Hz.pz
+
+processing:
+  channel: DPZ
+  output_units: VEL
+  filter:
+    type: bandpass
+    freqmin: 0.5        # Higher than typical broadband GMV due to 5Hz geophone rolloff
+    freqmax: 2.0        # Body wave frequencies
+    corners: 4
+    zerophase: true
+  decimate_factor: 50   # 250 Hz -> 5 Hz (sufficient for 0.5-2 Hz band)
+  normalize: true
+  pre_filter:
+    - 0.1
+    - 0.5
+    - 5.0
+    - 10.0
+
+animation:
+  # For real-time playback: time_step = 1/fps
+  # For 10x speed: time_step = 10/fps
+  realtime_factor: 10   # 10x speed (1 = real-time, 10 = 10x faster)
+  fps: 15
+  dpi: 150
+  format: gif
+  output_file: output/gmv_indonesia_20260911
+
+  map:
+    projection: PlateCarree
+    extent_pad: 0.02
+    background: terrain
+    title: "GEONAT SmartSolo Array - Ground Motion"
+
+  marker:
+    size: 30
+    alpha: 0.85
+    cmap: bwr
+    vmin: -1.0
+    vmax: 1.0
+
+  epicenter:
+    show: false   # Epicenter is too far away to show on local map

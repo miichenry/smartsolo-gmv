@@ -1,0 +1,66 @@
+# M6.5 Indonesia Earthquake - 2026-09-11
+# 121 km NNE of Teluknaga, Indonesia, depth 372 km
+# Auto time window: P-10s to R1+20s
+
+earthquake:
+  latitude: -5.0271
+  longitude: 106.8682
+  depth_km: 372.0
+  magnitude: 6.5
+  origin_time: "2026-09-11T21:23:55"
+  description: "121 km NNE of Teluknaga, Indonesia"
+
+time_window:
+  auto: true
+  before_P: 10
+  after_R1: 20
+
+data:
+  mseed_dirs:
+    - /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/miniseed_5Hz
+    - /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/miniseed_2Hz
+  station_csv: /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/geonat_mseed.csv
+  resp_files:
+    "4530": /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/RESP/smartsolo.5Hz.pz
+    "4236": /srv/beegfs/scratch/users/h/henrymi/project/GEONAT/RESP/smartsolo.2Hz.pz
+
+processing:
+  channel: DPZ
+  output_units: VEL
+  filter:
+    type: bandpass
+    freqmin: 0.5
+    freqmax: 2.0
+    corners: 4
+    zerophase: true
+  decimate_factor: 50
+  normalize: true
+  pre_filter:
+    - 0.1
+    - 0.5
+    - 5.0
+    - 10.0
+
+animation:
+  realtime_factor: 30    # 30x speed for quick test
+  fps: 10                # Lower fps for quick test
+  dpi: 100               # Lower dpi for quick test
+  format: gif
+  output_file: output/gmv_indonesia_20260911_auto
+
+  map:
+    projection: PlateCarree
+    extent_pad: 0.02
+    background: tiles
+    tile_zoom: 14
+    title: "GEONAT SmartSolo Array - Ground Motion"
+
+  marker:
+    size: 45
+    alpha: 0.85
+    cmap: bwr
+    vmin: -1.0
+    vmax: 1.0
+
+  epicenter:
+    show: false

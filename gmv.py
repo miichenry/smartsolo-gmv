@@ -20,6 +20,7 @@ import matplotlib
 matplotlib.use("Agg")
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import cartopy.io.img_tiles as cimgt
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
@@ -300,8 +301,34 @@ def load_and_process_waveforms(config, station_coords):
     data = config["data"]
 
     origin = UTCDateTime(eq["origin_time"])
-    t_start = origin - tw["pre_event_seconds"]
-    t_end = origin + tw["post_event_seconds"]
+
+    # Auto-compute time window from phase arrivals if requested
+    if tw.get("auto", False):
+        from math import radians, degrees, sin, cos, atan2, sqrt, asin
+        array_csv = data["station_csv"]
+        # Quick array center from first few stations
+        with open(array_csv) as _f:
+            _hdr = _f.readline().strip().split(",")
+            _idx = {c: i for i, c in enumerate(_hdr)}
+            _lons, _lats = [], []
+            for _line in _f:
+                _p = _line.strip().split(",")
+                if len(_p) >= len(_hdr):
+                    _lons.append(float(_p[_idx["longitude"]]))
+                    _lats.append(float(_p[_idx["latitude"]]))
+        _alat, _alon = np.mean(_lats), np.mean(_lons)
+        _dist, _ = compute_distance_azimuth(_alat, _alon, eq["latitude"], eq["longitude"])
+        _tt = compute_travel_times(_dist, eq["depth_km"])
+        p_time = _tt.get("P", _tt.get("PKP", 600))
+        r1_time = _tt.get("R1", _dist * 28.5)
+        pre_p = tw.get("before_P", 10)
+        post_r1 = tw.get("after_R1", 20)
+        t_start = origin + p_time - pre_p
+        t_end = origin + r1_time + post_r1
+        print(f"Auto time window: P-{pre_p}s ({p_time:.0f}s) to R1+{post_r1}s ({r1_time:.0f}s) = {t_end - t_start:.0f}s")
+    else:
+        t_start = origin - tw["pre_event_seconds"]
+        t_end = origin + tw["post_event_seconds"]
 
     # Date string for file matching
     event_date = origin.strftime("%Y.%m.%d")
@@ -484,8 +511,30 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     origin = UTCDateTime(eq["origin_time"])
     tw = config["time_window"]
 
-    t_start = origin - tw["pre_event_seconds"]
-    t_end = origin + tw["post_event_seconds"]
+    if tw.get("auto", False):
+        # Recompute auto time window from phase arrivals
+        array_csv = config["data"]["station_csv"]
+        with open(array_csv) as _f:
+            _hdr = _f.readline().strip().split(",")
+            _idx = {c: i for i, c in enumerate(_hdr)}
+            _lons, _lats = [], []
+            for _line in _f:
+                _p = _line.strip().split(",")
+                if len(_p) >= len(_hdr):
+                    _lons.append(float(_p[_idx["longitude"]]))
+                    _lats.append(float(_p[_idx["latitude"]]))
+        _alat, _alon = np.mean(_lats), np.mean(_lons)
+        _dist, _ = compute_distance_azimuth(_alat, _alon, eq["latitude"], eq["longitude"])
+        _tt = compute_travel_times(_dist, eq["depth_km"])
+        p_time = _tt.get("P", _tt.get("PKP", 600))
+        r1_time = _tt.get("R1", _dist * 28.5)
+        pre_p = tw.get("before_P", 10)
+        post_r1 = tw.get("after_R1", 20)
+        t_start = origin + p_time - pre_p
+        t_end = origin + r1_time + post_r1
+    else:
+        t_start = origin - tw["pre_event_seconds"]
+        t_end = origin + tw["post_event_seconds"]
 
     # Compute time_step from realtime_factor and fps
     fps = anim_cfg.get("fps", 15)
@@ -551,7 +600,24 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
 
     # ===================== MAP PANEL =====================
     bg = map_cfg.get("background", "terrain")
-    if bg == "terrain":
+    if bg == "tiles":
+        # ArcGIS tile background (like plot_station_days.py)
+        tile_url = map_cfg.get("tile_url",
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "World_Topo_Map/MapServer/tile/{z}/{y}/{x}.jpg")
+        tile_zoom = map_cfg.get("tile_zoom", 14)
+        tile = cimgt.GoogleTiles(url=tile_url)
+        # Re-create map axis with tile projection
+        ax_map.remove()
+        ax_map = fig.add_axes([0.05, 0.35, 0.80, 0.55], projection=tile.crs)
+        ax_map.set_extent(extent, crs=ccrs.PlateCarree())
+        try:
+            ax_map.add_image(tile, tile_zoom, interpolation='spline36', alpha=0.8)
+        except Exception as e:
+            print(f"Warning: Could not load tile background: {e}")
+            ax_map.add_feature(cfeature.LAND, facecolor="lightgray", alpha=0.5)
+            ax_map.add_feature(cfeature.BORDERS, linewidth=0.5)
+    elif bg == "terrain":
         try:
             ax_map.add_feature(cfeature.LAND, facecolor="lightgray", alpha=0.5)
             ax_map.add_feature(cfeature.BORDERS, linewidth=0.5)
@@ -841,16 +907,33 @@ def create_snapshot(stream, station_info, config, time_offset_s):
     pad = map_cfg.get("extent_pad", 0.05)
     extent = [lons.min() - pad, lons.max() + pad, lats.min() - pad, lats.max() + pad]
 
-    proj = getattr(ccrs, map_cfg.get("projection", "PlateCarree"))()
-    fig, ax = plt.subplots(figsize=(10, 8), subplot_kw={"projection": proj}, dpi=150)
-    ax.set_extent(extent, crs=ccrs.PlateCarree())
-
-    try:
-        ax.add_feature(cfeature.LAND, facecolor="lightgray", alpha=0.5)
-        ax.add_feature(cfeature.BORDERS, linewidth=0.5)
-    except Exception:
-        pass
-    ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
+    bg = map_cfg.get("background", "terrain")
+    if bg == "tiles":
+        tile_url = map_cfg.get("tile_url",
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "World_Topo_Map/MapServer/tile/{z}/{y}/{x}.jpg")
+        tile_zoom = map_cfg.get("tile_zoom", 14)
+        tile = cimgt.GoogleTiles(url=tile_url)
+        fig, ax = plt.subplots(figsize=(10, 8), subplot_kw={"projection": tile.crs}, dpi=150)
+        ax.set_extent(extent, crs=ccrs.PlateCarree())
+        try:
+            ax.add_image(tile, tile_zoom, interpolation='spline36', alpha=0.8)
+        except Exception as e:
+            print(f"Warning: Could not load tile background: {e}")
+            ax.add_feature(cfeature.LAND, facecolor="lightgray", alpha=0.5)
+            ax.add_feature(cfeature.BORDERS, linewidth=0.5)
+    else:
+        proj = getattr(ccrs, map_cfg.get("projection", "PlateCarree"))()
+        fig, ax = plt.subplots(figsize=(10, 8), subplot_kw={"projection": proj}, dpi=150)
+        ax.set_extent(extent, crs=ccrs.PlateCarree())
+        try:
+            ax.add_feature(cfeature.LAND, facecolor="lightgray", alpha=0.5)
+            ax.add_feature(cfeature.BORDERS, linewidth=0.5)
+        except Exception:
+            pass
+    gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
+    gl.top_labels = False
+    gl.right_labels = False
 
     cmap = plt.get_cmap(mk_cfg.get("cmap", "bwr"))
     norm = mcolors.Normalize(vmin=mk_cfg.get("vmin", -1), vmax=mk_cfg.get("vmax", 1))
