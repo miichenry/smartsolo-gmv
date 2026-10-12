@@ -18,11 +18,14 @@ from datetime import datetime
 
 import matplotlib
 matplotlib.use("Agg")
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-import cartopy.io.img_tiles as cimgt
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+
+try:
+    import contextily as cx
+    HAS_CONTEXTILY = True
+except ImportError:
+    HAS_CONTEXTILY = False
 import numpy as np
 import obspy
 import yaml
@@ -486,6 +489,70 @@ def compute_travel_times(dist_deg, depth_km):
     return tt
 
 
+def plot_taupy(dist_deg, depth_km, output_dir="output", event_label=""):
+    """
+    Generate TauPy figures: ray paths and travel time curve.
+
+    Saves two PNG files to output_dir.
+    """
+    from obspy.taup import TauPyModel
+    model = TauPyModel(model="iasp91")
+    phase_list = ["P", "pP", "S", "sS", "SS", "ScS", "PKP", "PKIKP",
+                  "SKS", "PP", "PcP"]
+
+    # get_ray_paths computes full ray geometry (needed for plotting)
+    arrivals = model.get_ray_paths(
+        source_depth_in_km=depth_km,
+        distance_in_degree=dist_deg,
+        phase_list=phase_list,
+    )
+
+    os.makedirs(output_dir, exist_ok=True)
+    safe_label = event_label.replace(" ", "_").replace(",", "")
+
+    # 1. Ray paths through the Earth
+    try:
+        ax_rays = arrivals.plot_rays(plot_type="spherical", legend=True,
+                                     plot_all=True, show=False)
+        fig_rays = ax_rays.figure
+        fig_rays.suptitle(
+            f"TauPy Ray Paths (iasp91)\n"
+            f"{event_label} | Dist={dist_deg:.1f}\u00b0 Depth={depth_km:.0f} km",
+            fontsize=11, fontweight="bold",
+        )
+        ray_path = os.path.join(output_dir, f"taupy_rays_{safe_label}.png")
+        fig_rays.savefig(ray_path, dpi=150, bbox_inches="tight")
+        plt.close(fig_rays)
+        print(f"TauPy ray paths saved to: {ray_path}")
+    except Exception as e:
+        print(f"Warning: Could not plot ray paths: {e}")
+
+    # 2. Travel time curve
+    try:
+        ax_tt = arrivals.plot_times(show=False)
+        fig_tt = ax_tt.figure
+        fig_tt.suptitle(
+            f"TauPy Travel Times (iasp91)\n"
+            f"{event_label} | Dist={dist_deg:.1f}\u00b0 Depth={depth_km:.0f} km",
+            fontsize=11, fontweight="bold",
+        )
+        tt_path = os.path.join(output_dir, f"taupy_times_{safe_label}.png")
+        fig_tt.savefig(tt_path, dpi=150, bbox_inches="tight")
+        plt.close(fig_tt)
+        print(f"TauPy travel times saved to: {tt_path}")
+    except Exception as e:
+        print(f"Warning: Could not plot travel times: {e}")
+
+    # 3. Print arrival table
+    print(f"\nTauPy Arrivals for {event_label} (dist={dist_deg:.1f}°, depth={depth_km:.0f} km):")
+    print(f"  {'Phase':<8} {'Time (s)':>10} {'Time (min)':>10}")
+    print(f"  {'-'*30}")
+    for arr in arrivals:
+        print(f"  {arr.name:<8} {arr.time:>10.1f} {arr.time/60:>10.1f}")
+    r1_time = dist_deg * 28.5
+    print(f"  {'R1':<8} {r1_time:>10.1f} {r1_time/60:>10.1f}  (estimated)")
+
+
 def create_animation(stream, raw_stream, filt_stream, station_info, config):
     """
     Create a two-panel GMV animation:
@@ -588,53 +655,43 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     gain_text = f"Gain: normalized"
 
     # ===================== FIGURE SETUP =====================
-    proj = getattr(ccrs, map_cfg.get("projection", "PlateCarree"))()
     fig = plt.figure(figsize=(12, 10), dpi=anim_cfg.get("dpi", 150))
 
     # Top panel: Map (55% of figure height)
-    ax_map = fig.add_axes([0.05, 0.35, 0.80, 0.55], projection=proj)
-    ax_map.set_extent(extent, crs=ccrs.PlateCarree())
+    ax_map = fig.add_axes([0.05, 0.35, 0.80, 0.55])
 
     # Bottom panel: Reference trace (25% of figure height)
     ax_trace = fig.add_axes([0.1, 0.06, 0.8, 0.22])
 
     # ===================== MAP PANEL =====================
-    bg = map_cfg.get("background", "terrain")
-    if bg == "tiles":
-        # ArcGIS tile background (like plot_station_days.py)
-        tile_url = map_cfg.get("tile_url",
-            "https://server.arcgisonline.com/ArcGIS/rest/services/"
-            "World_Topo_Map/MapServer/tile/{z}/{y}/{x}.jpg")
-        tile_zoom = map_cfg.get("tile_zoom", 14)
-        tile = cimgt.GoogleTiles(url=tile_url)
-        # Re-create map axis with tile projection
-        ax_map.remove()
-        ax_map = fig.add_axes([0.05, 0.35, 0.80, 0.55], projection=tile.crs)
-        ax_map.set_extent(extent, crs=ccrs.PlateCarree())
-        try:
-            ax_map.add_image(tile, tile_zoom, interpolation='spline36', alpha=0.8)
-        except Exception as e:
-            print(f"Warning: Could not load tile background: {e}")
-            ax_map.add_feature(cfeature.LAND, facecolor="lightgray", alpha=0.5)
-            ax_map.add_feature(cfeature.BORDERS, linewidth=0.5)
-    elif bg == "terrain":
-        try:
-            ax_map.add_feature(cfeature.LAND, facecolor="lightgray", alpha=0.5)
-            ax_map.add_feature(cfeature.BORDERS, linewidth=0.5)
-            ax_map.add_feature(cfeature.RIVERS, linewidth=0.3, alpha=0.5)
-        except Exception:
-            pass
-    # Gridlines: only bottom (lat) and left (lon) labels, no top axis
-    gl = ax_map.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
-    gl.top_labels = False
-    gl.right_labels = False
+    ax_map.set_xlim(extent[0], extent[1])
+    ax_map.set_ylim(extent[2], extent[3])
+    ax_map.set_xlabel("Longitude (°)", fontsize=9)
+    ax_map.set_ylabel("Latitude (°)", fontsize=9)
+    ax_map.set_aspect("equal")
+    ax_map.grid(True, linewidth=0.3, alpha=0.5)
 
-    # Great-circle path from earthquake to array center
+    # Add basemap tiles if contextily is available
+    if HAS_CONTEXTILY:
+        bg = map_cfg.get("background", "terrain")
+        tile_source = {
+            "terrain": cx.providers.Esri.WorldTopoMap,
+            "satellite": cx.providers.Esri.WorldImagery,
+            "street": cx.providers.OpenStreetMap.Mapnik,
+        }.get(bg, cx.providers.Esri.WorldTopoMap)
+        tile_zoom = map_cfg.get("tile_zoom", 14)
+        try:
+            cx.add_basemap(ax_map, crs="EPSG:4326", source=tile_source,
+                           zoom=tile_zoom, alpha=0.7)
+        except Exception as e:
+            print(f"Warning: Could not load basemap tiles: {e}")
+
+    # Path from earthquake to array center
     ax_map.plot(
         [eq["longitude"], array_lon],
         [eq["latitude"], array_lat],
         color="black", linewidth=1.5, linestyle="-",
-        transform=ccrs.Geodetic(), zorder=3,
+        zorder=3,
         label=f"GC path ({dist_deg:.1f}°)",
     )
 
@@ -652,7 +709,6 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         s=marker_size,
         alpha=mk_cfg.get("alpha", 0.85),
         edgecolors="k", linewidths=0.3,
-        transform=ccrs.PlateCarree(),
         zorder=5,
     )
 
@@ -662,7 +718,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         ref_lon, ref_lat,
         marker="v", markersize=9, color="lime",
         markeredgecolor="black", markeredgewidth=1,
-        transform=ccrs.PlateCarree(), zorder=8,
+        zorder=8,
         label=f"Ref: SS.{ref_station}",
     )
 
@@ -786,8 +842,9 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         t = times[frame_idx]
         elapsed = t - origin
 
-        # Update scatter colors
+        # Update scatter colors (force fixed clim so colorbar doesn't change)
         scatter.set_array(amplitude_frames[frame_idx])
+        scatter.set_clim(mk_cfg.get("vmin", -1), mk_cfg.get("vmax", 1))
 
         # Format time as HH:MM:SS like original GMV
         abs_elapsed = abs(elapsed)
@@ -822,7 +879,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         fig, update,
         frames=n_frames,
         interval=1000 / anim_cfg.get("fps", 15),
-        blit=False,
+        blit=True,
     )
 
     # Save
@@ -907,33 +964,28 @@ def create_snapshot(stream, station_info, config, time_offset_s):
     pad = map_cfg.get("extent_pad", 0.05)
     extent = [lons.min() - pad, lons.max() + pad, lats.min() - pad, lats.max() + pad]
 
-    bg = map_cfg.get("background", "terrain")
-    if bg == "tiles":
-        tile_url = map_cfg.get("tile_url",
-            "https://server.arcgisonline.com/ArcGIS/rest/services/"
-            "World_Topo_Map/MapServer/tile/{z}/{y}/{x}.jpg")
+    fig, ax = plt.subplots(figsize=(10, 8), dpi=150)
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_xlabel("Longitude (°)", fontsize=9)
+    ax.set_ylabel("Latitude (°)", fontsize=9)
+    ax.set_aspect("equal")
+    ax.grid(True, linewidth=0.3, alpha=0.5)
+
+    # Add basemap tiles if contextily is available
+    if HAS_CONTEXTILY:
+        bg = map_cfg.get("background", "terrain")
+        tile_source = {
+            "terrain": cx.providers.Esri.WorldTopoMap,
+            "satellite": cx.providers.Esri.WorldImagery,
+            "street": cx.providers.OpenStreetMap.Mapnik,
+        }.get(bg, cx.providers.Esri.WorldTopoMap)
         tile_zoom = map_cfg.get("tile_zoom", 14)
-        tile = cimgt.GoogleTiles(url=tile_url)
-        fig, ax = plt.subplots(figsize=(10, 8), subplot_kw={"projection": tile.crs}, dpi=150)
-        ax.set_extent(extent, crs=ccrs.PlateCarree())
         try:
-            ax.add_image(tile, tile_zoom, interpolation='spline36', alpha=0.8)
+            cx.add_basemap(ax, crs="EPSG:4326", source=tile_source,
+                           zoom=tile_zoom, alpha=0.7)
         except Exception as e:
-            print(f"Warning: Could not load tile background: {e}")
-            ax.add_feature(cfeature.LAND, facecolor="lightgray", alpha=0.5)
-            ax.add_feature(cfeature.BORDERS, linewidth=0.5)
-    else:
-        proj = getattr(ccrs, map_cfg.get("projection", "PlateCarree"))()
-        fig, ax = plt.subplots(figsize=(10, 8), subplot_kw={"projection": proj}, dpi=150)
-        ax.set_extent(extent, crs=ccrs.PlateCarree())
-        try:
-            ax.add_feature(cfeature.LAND, facecolor="lightgray", alpha=0.5)
-            ax.add_feature(cfeature.BORDERS, linewidth=0.5)
-        except Exception:
-            pass
-    gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
-    gl.top_labels = False
-    gl.right_labels = False
+            print(f"Warning: Could not load basemap tiles: {e}")
 
     cmap = plt.get_cmap(mk_cfg.get("cmap", "bwr"))
     norm = mcolors.Normalize(vmin=mk_cfg.get("vmin", -1), vmax=mk_cfg.get("vmax", 1))
@@ -942,7 +994,7 @@ def create_snapshot(stream, station_info, config, time_offset_s):
         lons, lats, c=amplitudes, cmap=cmap, norm=norm,
         s=mk_cfg.get("size", 40), alpha=mk_cfg.get("alpha", 0.85),
         edgecolors="k", linewidths=0.3,
-        transform=ccrs.PlateCarree(), zorder=5,
+        zorder=5,
     )
 
     plt.colorbar(scatter, ax=ax, shrink=0.6, pad=0.02, label="Normalized Amplitude")
@@ -956,7 +1008,7 @@ def create_snapshot(stream, station_info, config, time_offset_s):
             color=epi_cfg.get("color", "gold"),
             markeredgecolor=epi_cfg.get("edgecolor", "black"),
             markeredgewidth=1,
-            transform=ccrs.PlateCarree(), zorder=10,
+            zorder=10,
         )
 
     elapsed = time_offset_s
@@ -1034,6 +1086,21 @@ Examples:
         sys.exit(1)
 
     print(f"Ready: {len(stream)} stations with data")
+
+    # Generate TauPy figures
+    eq = config["earthquake"]
+    anim_cfg = config["animation"]
+    stations = list(station_info.keys())
+    lons = np.array([station_info[s][0] for s in stations])
+    lats = np.array([station_info[s][1] for s in stations])
+    array_lat, array_lon = np.mean(lats), np.mean(lons)
+    dist_deg, _ = compute_distance_azimuth(
+        array_lat, array_lon, eq["latitude"], eq["longitude"]
+    )
+    output_path = anim_cfg.get("output_file", "output/gmv_animation")
+    output_dir = os.path.dirname(output_path) or "output"
+    event_label = f"M{eq['magnitude']}_{eq.get('description', '')[:40]}"
+    plot_taupy(dist_deg, eq["depth_km"], output_dir=output_dir, event_label=event_label)
 
     # Create output
     if args.snapshot is not None:
