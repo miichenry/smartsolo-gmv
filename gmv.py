@@ -26,6 +26,13 @@ try:
     HAS_CONTEXTILY = True
 except ImportError:
     HAS_CONTEXTILY = False
+
+try:
+    import geopandas as gpd
+    from shapely.geometry import box
+    HAS_GEOPANDAS = True
+except ImportError:
+    HAS_GEOPANDAS = False
 import numpy as np
 import obspy
 import yaml
@@ -489,6 +496,178 @@ def compute_travel_times(dist_deg, depth_km):
     return tt
 
 
+def _load_natural_earth():
+    """Load Natural Earth country boundaries via geopandas. Returns GeoDataFrame or None."""
+    if not HAS_GEOPANDAS:
+        return None
+    try:
+        return gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
+    except Exception:
+        pass
+    try:
+        return gpd.read_file(
+            "https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip")
+    except Exception as e:
+        print(f"Warning: Could not load Natural Earth data: {e}")
+        return None
+
+
+# Cache Natural Earth data (loaded once)
+_natural_earth_cache = None
+
+
+def _get_natural_earth():
+    """Get cached Natural Earth data."""
+    global _natural_earth_cache
+    if _natural_earth_cache is None:
+        _natural_earth_cache = _load_natural_earth()
+    return _natural_earth_cache
+
+
+def add_basemap(ax, extent, map_cfg):
+    """
+    Add basemap tiles and geographic features (coastlines, borders)
+    to a matplotlib axes.
+    """
+    # Add tiles if contextily is available
+    if HAS_CONTEXTILY:
+        bg = map_cfg.get("background", "terrain")
+        tile_source = {
+            "terrain": cx.providers.Esri.WorldTopoMap,
+            "satellite": cx.providers.Esri.WorldImagery,
+            "street": cx.providers.OpenStreetMap.Mapnik,
+        }.get(bg, cx.providers.Esri.WorldTopoMap)
+        tile_zoom = map_cfg.get("tile_zoom", 14)
+        try:
+            cx.add_basemap(ax, crs="EPSG:4326", source=tile_source,
+                           zoom=tile_zoom, alpha=0.85)
+        except Exception as e:
+            print(f"Warning: Could not load basemap tiles: {e}")
+
+    # Overlay coastlines and borders from Natural Earth
+    world = _get_natural_earth()
+    if world is not None:
+        bbox = box(extent[0] - 1, extent[2] - 1, extent[1] + 1, extent[3] + 1)
+        try:
+            clipped = world.clip(bbox)
+            clipped.boundary.plot(ax=ax, color="black", linewidth=0.6, zorder=2)
+        except Exception as e:
+            print(f"Warning: Could not plot geographic features: {e}")
+
+    # Re-apply extent (basemap/geopandas may shift it)
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+
+
+def add_globe_inset(fig, array_lon, array_lat, eq_lon, eq_lat):
+    """
+    Add a small orthographic globe inset showing the network location,
+    earthquake epicenter, and great-circle path. Wikipedia-style with
+    filled land masses.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+    array_lon, array_lat : float
+        Network center coordinates.
+    eq_lon, eq_lat : float
+        Earthquake epicenter coordinates.
+    """
+    from math import radians, cos, sin
+
+    # Inset axes in the top-left corner of the figure
+    ax_globe = fig.add_axes([0.02, 0.72, 0.18, 0.18], polar=True)
+    ax_globe.set_facecolor("#D6EAF8")  # light ocean blue
+
+    # Orthographic projection: project points onto a disc centered on the
+    # midpoint between array and earthquake
+    mid_lon = (array_lon + eq_lon) / 2
+    mid_lat = (array_lat + eq_lat) / 2
+
+    def ortho_project(lon, lat, lon0, lat0):
+        """Orthographic projection. Returns (x, y, visible)."""
+        lon, lat, lon0, lat0 = map(radians, [lon, lat, lon0, lat0])
+        x = cos(lat) * sin(lon - lon0)
+        y = cos(lat0) * sin(lat) - sin(lat0) * cos(lat) * cos(lon - lon0)
+        cos_c = sin(lat0) * sin(lat) + cos(lat0) * cos(lat) * cos(lon - lon0)
+        return x, y, cos_c > 0
+
+    # Switch to a regular (non-polar) axes
+    ax_globe.remove()
+    ax_globe = fig.add_axes([0.02, 0.72, 0.18, 0.18])
+    ax_globe.set_xlim(-1.05, 1.05)
+    ax_globe.set_ylim(-1.05, 1.05)
+    ax_globe.set_aspect("equal")
+    ax_globe.axis("off")
+
+    # Draw globe circle
+    theta = np.linspace(0, 2 * np.pi, 100)
+    ax_globe.fill(np.cos(theta), np.sin(theta), color="#D6EAF8", zorder=0)
+    ax_globe.plot(np.cos(theta), np.sin(theta), color="black", linewidth=0.8, zorder=5)
+
+    # Draw land masses from Natural Earth
+    world = _get_natural_earth()
+    if world is not None:
+        for _, country in world.iterrows():
+            geom = country.geometry
+            if geom is None:
+                continue
+            polys = [geom] if geom.geom_type == "Polygon" else list(geom.geoms)
+            for poly in polys:
+                coords = np.array(poly.exterior.coords)
+                projected = [ortho_project(lon, lat, mid_lon, mid_lat)
+                             for lon, lat in coords]
+                # Only draw if most points are on the visible side
+                visible = [p for p in projected if p[2]]
+                if len(visible) < len(projected) * 0.3:
+                    continue
+                xs = [p[0] for p in projected if p[2]]
+                ys = [p[1] for p in projected if p[2]]
+                if len(xs) > 2:
+                    ax_globe.fill(xs, ys, color="#C8D6B9", edgecolor="#555555",
+                                  linewidth=0.3, zorder=1)
+
+    # Draw great-circle path (sample points along the arc)
+    n_pts = 100
+    fracs = np.linspace(0, 1, n_pts)
+    gc_lons = array_lon + fracs * (eq_lon - array_lon)
+    gc_lats = array_lat + fracs * (eq_lat - array_lat)
+    # Spherical interpolation for great circle
+    from math import acos, degrees
+    lat1r, lon1r = radians(array_lat), radians(array_lon)
+    lat2r, lon2r = radians(eq_lat), radians(eq_lon)
+    d = acos(min(1, max(-1,
+        sin(lat1r) * sin(lat2r) + cos(lat1r) * cos(lat2r) * cos(lon2r - lon1r))))
+    if d > 0.001:
+        gc_xs, gc_ys = [], []
+        for f in fracs:
+            A = sin((1 - f) * d) / sin(d)
+            B = sin(f * d) / sin(d)
+            x = A * cos(lat1r) * cos(lon1r) + B * cos(lat2r) * cos(lon2r)
+            y = A * cos(lat1r) * sin(lon1r) + B * cos(lat2r) * sin(lon2r)
+            z = A * sin(lat1r) + B * sin(lat2r)
+            lat_i = degrees(np.arctan2(z, np.sqrt(x**2 + y**2)))
+            lon_i = degrees(np.arctan2(y, x))
+            px, py, vis = ortho_project(lon_i, lat_i, mid_lon, mid_lat)
+            if vis:
+                gc_xs.append(px)
+                gc_ys.append(py)
+        if gc_xs:
+            ax_globe.plot(gc_xs, gc_ys, color="black", linewidth=1.0, zorder=3)
+
+    # Plot network (inverted triangle) and epicenter (star)
+    ax, ay, avis = ortho_project(array_lon, array_lat, mid_lon, mid_lat)
+    if avis:
+        ax_globe.plot(ax, ay, marker="v", markersize=8, color="lime",
+                      markeredgecolor="black", markeredgewidth=0.8, zorder=4)
+    ex, ey, evis = ortho_project(eq_lon, eq_lat, mid_lon, mid_lat)
+    if evis:
+        ax_globe.plot(ex, ey, marker="*", markersize=10, color="red",
+                      markeredgecolor="black", markeredgewidth=0.5, zorder=4)
+
+    return ax_globe
+
+
 def plot_taupy(dist_deg, depth_km, output_dir="output", event_label=""):
     """
     Generate TauPy figures: ray paths and travel time curve.
@@ -671,20 +850,11 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     ax_map.set_aspect("equal")
     ax_map.grid(True, linewidth=0.3, alpha=0.5)
 
-    # Add basemap tiles if contextily is available
-    if HAS_CONTEXTILY:
-        bg = map_cfg.get("background", "terrain")
-        tile_source = {
-            "terrain": cx.providers.Esri.WorldTopoMap,
-            "satellite": cx.providers.Esri.WorldImagery,
-            "street": cx.providers.OpenStreetMap.Mapnik,
-        }.get(bg, cx.providers.Esri.WorldTopoMap)
-        tile_zoom = map_cfg.get("tile_zoom", 14)
-        try:
-            cx.add_basemap(ax_map, crs="EPSG:4326", source=tile_source,
-                           zoom=tile_zoom, alpha=0.7)
-        except Exception as e:
-            print(f"Warning: Could not load basemap tiles: {e}")
+    # Add basemap tiles and geographic features
+    add_basemap(ax_map, extent, map_cfg)
+
+    # Globe inset (top-left corner)
+    add_globe_inset(fig, array_lon, array_lat, eq["longitude"], eq["latitude"])
 
     # Path from earthquake to array center
     ax_map.plot(
@@ -842,9 +1012,8 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         t = times[frame_idx]
         elapsed = t - origin
 
-        # Update scatter colors (force fixed clim so colorbar doesn't change)
+        # Update scatter colors
         scatter.set_array(amplitude_frames[frame_idx])
-        scatter.set_clim(mk_cfg.get("vmin", -1), mk_cfg.get("vmax", 1))
 
         # Format time as HH:MM:SS like original GMV
         abs_elapsed = abs(elapsed)
@@ -972,20 +1141,11 @@ def create_snapshot(stream, station_info, config, time_offset_s):
     ax.set_aspect("equal")
     ax.grid(True, linewidth=0.3, alpha=0.5)
 
-    # Add basemap tiles if contextily is available
-    if HAS_CONTEXTILY:
-        bg = map_cfg.get("background", "terrain")
-        tile_source = {
-            "terrain": cx.providers.Esri.WorldTopoMap,
-            "satellite": cx.providers.Esri.WorldImagery,
-            "street": cx.providers.OpenStreetMap.Mapnik,
-        }.get(bg, cx.providers.Esri.WorldTopoMap)
-        tile_zoom = map_cfg.get("tile_zoom", 14)
-        try:
-            cx.add_basemap(ax, crs="EPSG:4326", source=tile_source,
-                           zoom=tile_zoom, alpha=0.7)
-        except Exception as e:
-            print(f"Warning: Could not load basemap tiles: {e}")
+    # Add basemap tiles and geographic features
+    add_basemap(ax, extent, map_cfg)
+
+    # Globe inset
+    add_globe_inset(fig, np.mean(lons), np.mean(lats), eq["longitude"], eq["latitude"])
 
     cmap = plt.get_cmap(mk_cfg.get("cmap", "bwr"))
     norm = mcolors.Normalize(vmin=mk_cfg.get("vmin", -1), vmax=mk_cfg.get("vmax", 1))
