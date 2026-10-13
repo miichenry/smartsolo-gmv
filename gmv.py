@@ -869,7 +869,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         raw_times_s = np.arange(ref_raw.stats.npts) / ref_raw.stats.sampling_rate
         raw_times_rel = raw_times_s + (ref_raw.stats.starttime - origin)
         raw_data = ref_raw.data * scale_factor
-        ax_trace.plot(raw_times_rel, raw_data, color="lightgray", linewidth=0.4,
+        ax_trace.plot(raw_times_rel, raw_data, color="gray", linewidth=0.4,
                       label="Unfiltered", zorder=1)
 
     # Plot filtered trace in black
