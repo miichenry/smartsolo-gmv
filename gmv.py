@@ -823,7 +823,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         marker="*", markersize=10, color="red",
         markeredgecolor="black", markeredgewidth=0.5,
         linestyle="None", zorder=6,
-        label=f"Epicenter M{eq['magnitude']}",
+        label="Epicenter",
     )
 
     # Legend on the right side
