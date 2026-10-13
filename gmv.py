@@ -486,13 +486,10 @@ def compute_travel_times(dist_deg, depth_km):
 def _load_coastlines():
     """
     Load Natural Earth country polygons for globe rendering.
-    Uses urllib + json to parse GeoJSON — no geopandas needed.
+    Uses bundled GeoJSON file (data/ne_110m_countries.geojson).
     Returns list of (lons_array, lats_array) polygon segments.
     """
     import json
-    import urllib.request
-    import zipfile
-    import io
 
     def _extract_geojson_segments(geojson):
         segments = []
@@ -511,23 +508,18 @@ def _load_coastlines():
                 segments.append((arr[:, 0], arr[:, 1]))
         return segments
 
-    # Try downloading Natural Earth GeoJSON
-    urls = [
-        "https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.geojson",
-    ]
-    for url in urls:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "GMV/1.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            segs = _extract_geojson_segments(data)
-            if segs:
-                return segs
-        except Exception:
-            pass
+    # Load bundled GeoJSON file
+    geojson_path = os.path.join(os.path.dirname(__file__), "data", "ne_110m_countries.geojson")
+    try:
+        with open(geojson_path, "r") as f:
+            data = json.load(f)
+        segs = _extract_geojson_segments(data)
+        if segs:
+            return segs
+    except Exception as e:
+        print(f"Warning: Could not load {geojson_path}: {e}")
 
-    # Fallback: try zip shapefile via fiona-less parsing (won't work, just skip)
-    print("Warning: Could not download Natural Earth data, globe will have no land masses")
+    print("Warning: No Natural Earth data found, globe will have no land masses")
     return []
 
 
@@ -893,7 +885,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     ax_trace.set_ylabel(unit_label, fontsize=9)
     ax_trace.axhline(y=0, color="gray", linewidth=0.3)
     ax_trace.axvline(x=0, color="green", linewidth=0.8, linestyle="--",
-                     label="OT", alpha=0.7)
+                     alpha=0.7)
 
     # Compute theoretical phase arrivals (used for auto time window)
     travel_times = compute_travel_times(dist_deg, eq["depth_km"])
