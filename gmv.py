@@ -772,7 +772,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
 
     # ArcGIS basemap tiles
     tile_zoom = map_cfg.get("tile_zoom", "auto")
-    add_basemap(ax_map, extent, zoom=tile_zoom)
+    add_basemap(ax_map, extent, zoom=10)
 
     # Globe inset (top-left corner)
     add_globe_inset(fig, array_lon, array_lat, eq["longitude"], eq["latitude"])
