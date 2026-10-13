@@ -540,6 +540,17 @@ def _get_coastlines():
     return _coastline_cache
 
 
+def add_coastlines(ax, extent):
+    """Plot Natural Earth country borders on a plain matplotlib axes."""
+    coastlines = _get_coastlines()
+    if not coastlines:
+        return
+    for lons_seg, lats_seg in coastlines:
+        ax.plot(lons_seg, lats_seg, color="gray", linewidth=0.4, zorder=1)
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+
+
 def add_globe_inset(fig, array_lon, array_lat, eq_lon, eq_lat):
     """
     Add a small orthographic globe inset with Wikipedia-style filled land,
@@ -756,6 +767,9 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     ax_map.set_aspect("equal")
     ax_map.grid(True, linewidth=0.3, alpha=0.5)
 
+    # Country borders from Natural Earth
+    add_coastlines(ax_map, extent)
+
     # Globe inset (top-left corner)
     add_globe_inset(fig, array_lon, array_lat, eq["longitude"], eq["latitude"])
 
@@ -798,6 +812,15 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     cbar_ax = fig.add_axes([0.87, 0.40, 0.02, 0.40])
     cbar = fig.colorbar(sm, cax=cbar_ax)
     cbar.set_label("Normalized Amplitude", fontsize=9)
+
+    # Earthquake epicenter marker (for legend — plotted off-map if outside extent)
+    ax_map.plot(
+        eq["longitude"], eq["latitude"],
+        marker="*", markersize=10, color="red",
+        markeredgecolor="black", markeredgewidth=0.5,
+        linestyle="None", zorder=6,
+        label=f"Epicenter M{eq['magnitude']}",
+    )
 
     # Legend on the right side
     ax_map.legend(
@@ -1077,7 +1100,8 @@ def create_snapshot(stream, station_info, config, time_offset_s):
     ax.set_aspect("equal")
     ax.grid(True, linewidth=0.3, alpha=0.5)
 
-    # Globe inset
+    # Country borders and globe inset
+    add_coastlines(ax, extent)
     add_globe_inset(fig, np.mean(lons), np.mean(lats), eq["longitude"], eq["latitude"])
 
     cmap = plt.get_cmap(mk_cfg.get("cmap", "bwr"))
