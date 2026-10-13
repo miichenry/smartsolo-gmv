@@ -486,46 +486,48 @@ def compute_travel_times(dist_deg, depth_km):
 def _load_coastlines():
     """
     Load Natural Earth country polygons for globe rendering.
+    Uses urllib + json to parse GeoJSON — no geopandas needed.
     Returns list of (lons_array, lats_array) polygon segments.
     """
-    def _extract_segments(world):
+    import json
+    import urllib.request
+    import zipfile
+    import io
+
+    def _extract_geojson_segments(geojson):
         segments = []
-        for _, row in world.iterrows():
-            geom = row.geometry
-            if geom is None:
-                continue
-            if geom.geom_type == "Polygon":
-                polys = [geom]
-            elif geom.geom_type == "MultiPolygon":
-                polys = list(geom.geoms)
+        for feature in geojson.get("features", []):
+            geom = feature.get("geometry", {})
+            gtype = geom.get("type", "")
+            coords = geom.get("coordinates", [])
+            if gtype == "Polygon":
+                rings = [coords[0]]  # exterior ring only
+            elif gtype == "MultiPolygon":
+                rings = [poly[0] for poly in coords]
             else:
                 continue
-            for poly in polys:
-                coords = np.array(poly.exterior.coords)
-                segments.append((coords[:, 0], coords[:, 1]))
+            for ring in rings:
+                arr = np.array(ring)
+                segments.append((arr[:, 0], arr[:, 1]))
         return segments
 
-    try:
-        import geopandas as gpd
+    # Try downloading Natural Earth GeoJSON
+    urls = [
+        "https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.geojson",
+    ]
+    for url in urls:
         try:
-            world = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
-            segs = _extract_segments(world)
+            req = urllib.request.Request(url, headers={"User-Agent": "GMV/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            segs = _extract_geojson_segments(data)
             if segs:
                 return segs
         except Exception:
             pass
-        try:
-            world = gpd.read_file(
-                "https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip")
-            segs = _extract_segments(world)
-            if segs:
-                return segs
-        except Exception:
-            pass
-    except ImportError:
-        pass
 
-    print("Warning: geopandas not available, globe will have no land masses")
+    # Fallback: try zip shapefile via fiona-less parsing (won't work, just skip)
+    print("Warning: Could not download Natural Earth data, globe will have no land masses")
     return []
 
 
@@ -540,15 +542,24 @@ def _get_coastlines():
     return _coastline_cache
 
 
-def add_coastlines(ax, extent):
-    """Plot Natural Earth country borders on a plain matplotlib axes."""
-    coastlines = _get_coastlines()
-    if not coastlines:
-        return
-    for lons_seg, lats_seg in coastlines:
-        ax.plot(lons_seg, lats_seg, color="gray", linewidth=0.4, zorder=1)
-    ax.set_xlim(extent[0], extent[1])
-    ax.set_ylim(extent[2], extent[3])
+def add_basemap(ax, extent, zoom="auto"):
+    """Add ArcGIS World Topo tile basemap using contextily."""
+    try:
+        import contextily as ctx
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
+        ctx.add_basemap(
+            ax, crs="EPSG:4326",
+            source=ctx.providers.Esri.WorldTopoMap,
+            zoom=zoom if zoom != "auto" else "auto",
+            attribution=False,
+        )
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
+    except ImportError:
+        print("Warning: contextily not available, no basemap tiles")
+    except Exception as e:
+        print(f"Warning: Failed to add basemap tiles: {e}")
 
 
 def add_globe_inset(fig, array_lon, array_lat, eq_lon, eq_lat):
@@ -767,8 +778,9 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     ax_map.set_aspect("equal")
     ax_map.grid(True, linewidth=0.3, alpha=0.5)
 
-    # Country borders from Natural Earth
-    add_coastlines(ax_map, extent)
+    # ArcGIS basemap tiles
+    tile_zoom = map_cfg.get("tile_zoom", "auto")
+    add_basemap(ax_map, extent, zoom=tile_zoom)
 
     # Globe inset (top-left corner)
     add_globe_inset(fig, array_lon, array_lat, eq["longitude"], eq["latitude"])
@@ -883,24 +895,9 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     ax_trace.axvline(x=0, color="green", linewidth=0.8, linestyle="--",
                      label="OT", alpha=0.7)
 
-    # Compute and plot theoretical phase arrivals (blue, like original GMV)
+    # Compute theoretical phase arrivals (used for auto time window)
     travel_times = compute_travel_times(dist_deg, eq["depth_km"])
     max_amp = max(abs(filt_data.max()), abs(filt_data.min())) if len(filt_data) > 0 else 1
-    phase_spacing = 200  # Minimum seconds between phase labels
-    last_label_time = -999
-    for phase, tt in sorted(travel_times.items(), key=lambda x: x[1]):
-        if t_start - origin <= tt <= t_end - origin:
-            ax_trace.axvline(x=tt, color="blue", linewidth=0.5, zorder=3)
-            # Enforce spacing between labels (except R1 always shown)
-            if phase == "R1" or (tt - last_label_time) > phase_spacing:
-                ax_trace.text(
-                    tt, max_amp * 0.95, phase,
-                    horizontalalignment="center", verticalalignment="center",
-                    size=6, color="blue",
-                    bbox=dict(facecolor="white", alpha=0.99, lw=0, pad=0),
-                    zorder=4,
-                )
-                last_label_time = tt
 
     # Title and legend
     ax_trace.set_title("Vertical Component", fontsize=9, loc="left")
@@ -1100,8 +1097,8 @@ def create_snapshot(stream, station_info, config, time_offset_s):
     ax.set_aspect("equal")
     ax.grid(True, linewidth=0.3, alpha=0.5)
 
-    # Country borders and globe inset
-    add_coastlines(ax, extent)
+    # ArcGIS basemap tiles and globe inset
+    add_basemap(ax, extent)
     add_globe_inset(fig, np.mean(lons), np.mean(lats), eq["longitude"], eq["latitude"])
 
     cmap = plt.get_cmap(mk_cfg.get("cmap", "bwr"))
