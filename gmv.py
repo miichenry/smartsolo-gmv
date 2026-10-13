@@ -21,18 +21,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
-try:
-    import contextily as cx
-    HAS_CONTEXTILY = True
-except ImportError:
-    HAS_CONTEXTILY = False
-
-try:
-    import geopandas as gpd
-    from shapely.geometry import box
-    HAS_GEOPANDAS = True
-except ImportError:
-    HAS_GEOPANDAS = False
 import numpy as np
 import obspy
 import yaml
@@ -496,151 +484,119 @@ def compute_travel_times(dist_deg, depth_km):
     return tt
 
 
-def _load_natural_earth():
-    """Load Natural Earth country boundaries via geopandas. Returns GeoDataFrame or None."""
-    if not HAS_GEOPANDAS:
-        return None
+def _load_coastlines():
+    """
+    Load Natural Earth coastline coordinates from the shapefile bundled
+    with matplotlib (used by Basemap/cartopy internally).
+    Falls back to a simplified built-in dataset.
+    Returns list of (lons_array, lats_array) polygon segments.
+    """
     try:
-        return gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
+        from matplotlib.collections import LineCollection
+        import json
+        # matplotlib bundles Natural Earth data for its own use
+        import importlib.resources
+        # Try geopandas first (most reliable)
+        import geopandas as gpd
+        world = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
+        segments = []
+        for _, row in world.iterrows():
+            geom = row.geometry
+            if geom is None:
+                continue
+            if geom.geom_type == "Polygon":
+                polys = [geom]
+            elif geom.geom_type == "MultiPolygon":
+                polys = list(geom.geoms)
+            else:
+                continue
+            for poly in polys:
+                coords = np.array(poly.exterior.coords)
+                segments.append((coords[:, 0], coords[:, 1]))
+        return segments
     except Exception:
         pass
+
+    # Fallback: try reading NE shapefiles directly via pyshp
     try:
-        return gpd.read_file(
-            "https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip")
-    except Exception as e:
-        print(f"Warning: Could not load Natural Earth data: {e}")
-        return None
+        import shapefile
+        import os
+        ne_path = os.path.join(os.path.dirname(__file__),
+                               "data", "ne_110m_coastline.shp")
+        if os.path.exists(ne_path):
+            sf = shapefile.Reader(ne_path)
+            segments = []
+            for shape in sf.shapes():
+                pts = np.array(shape.points)
+                segments.append((pts[:, 0], pts[:, 1]))
+            return segments
+    except Exception:
+        pass
+
+    return []
 
 
-# Cache Natural Earth data (loaded once)
-_natural_earth_cache = None
+_coastline_cache = None
 
 
-def _get_natural_earth():
-    """Get cached Natural Earth data."""
-    global _natural_earth_cache
-    if _natural_earth_cache is None:
-        _natural_earth_cache = _load_natural_earth()
-    return _natural_earth_cache
-
-
-def add_basemap(ax, extent, map_cfg):
-    """
-    Add basemap tiles and geographic features (coastlines, borders)
-    to a matplotlib axes.
-    """
-    # Add tiles if contextily is available
-    if HAS_CONTEXTILY:
-        bg = map_cfg.get("background", "terrain")
-        tile_source = {
-            "terrain": cx.providers.Esri.WorldTopoMap,
-            "satellite": cx.providers.Esri.WorldImagery,
-            "street": cx.providers.OpenStreetMap.Mapnik,
-        }.get(bg, cx.providers.Esri.WorldTopoMap)
-        tile_zoom = map_cfg.get("tile_zoom", 14)
-        try:
-            cx.add_basemap(ax, crs="EPSG:4326", source=tile_source,
-                           zoom=tile_zoom, alpha=0.85)
-        except Exception as e:
-            print(f"Warning: Could not load basemap tiles: {e}")
-
-    # Overlay coastlines and borders from Natural Earth
-    world = _get_natural_earth()
-    if world is not None:
-        bbox = box(extent[0] - 1, extent[2] - 1, extent[1] + 1, extent[3] + 1)
-        try:
-            clipped = world.clip(bbox)
-            clipped.boundary.plot(ax=ax, color="black", linewidth=0.6, zorder=2)
-        except Exception as e:
-            print(f"Warning: Could not plot geographic features: {e}")
-
-    # Re-apply extent (basemap/geopandas may shift it)
-    ax.set_xlim(extent[0], extent[1])
-    ax.set_ylim(extent[2], extent[3])
+def _get_coastlines():
+    """Get cached coastline data."""
+    global _coastline_cache
+    if _coastline_cache is None:
+        _coastline_cache = _load_coastlines()
+    return _coastline_cache
 
 
 def add_globe_inset(fig, array_lon, array_lat, eq_lon, eq_lat):
     """
-    Add a small orthographic globe inset showing the network location,
-    earthquake epicenter, and great-circle path. Wikipedia-style with
-    filled land masses.
-
-    Parameters
-    ----------
-    fig : matplotlib.figure.Figure
-    array_lon, array_lat : float
-        Network center coordinates.
-    eq_lon, eq_lat : float
-        Earthquake epicenter coordinates.
+    Add a small orthographic globe inset with Wikipedia-style land masses,
+    the network as an inverted triangle, the epicenter as a star,
+    and the great-circle path.
     """
-    from math import radians, cos, sin
+    from math import radians, cos, sin, acos, degrees
 
-    # Inset axes in the top-left corner of the figure
-    ax_globe = fig.add_axes([0.02, 0.72, 0.18, 0.18], polar=True)
-    ax_globe.set_facecolor("#D6EAF8")  # light ocean blue
-
-    # Orthographic projection: project points onto a disc centered on the
-    # midpoint between array and earthquake
     mid_lon = (array_lon + eq_lon) / 2
     mid_lat = (array_lat + eq_lat) / 2
 
-    def ortho_project(lon, lat, lon0, lat0):
-        """Orthographic projection. Returns (x, y, visible)."""
-        lon, lat, lon0, lat0 = map(radians, [lon, lat, lon0, lat0])
-        x = cos(lat) * sin(lon - lon0)
-        y = cos(lat0) * sin(lat) - sin(lat0) * cos(lat) * cos(lon - lon0)
-        cos_c = sin(lat0) * sin(lat) + cos(lat0) * cos(lat) * cos(lon - lon0)
+    def ortho(lon, lat):
+        """Orthographic projection centered on mid_lon/mid_lat. Returns (x, y, visible)."""
+        lo, la = radians(lon), radians(lat)
+        lo0, la0 = radians(mid_lon), radians(mid_lat)
+        x = cos(la) * sin(lo - lo0)
+        y = cos(la0) * sin(la) - sin(la0) * cos(la) * cos(lo - lo0)
+        cos_c = sin(la0) * sin(la) + cos(la0) * cos(la) * cos(lo - lo0)
         return x, y, cos_c > 0
 
-    # Switch to a regular (non-polar) axes
-    ax_globe.remove()
-    ax_globe = fig.add_axes([0.02, 0.72, 0.18, 0.18])
-    ax_globe.set_xlim(-1.05, 1.05)
-    ax_globe.set_ylim(-1.05, 1.05)
-    ax_globe.set_aspect("equal")
-    ax_globe.axis("off")
+    ax_g = fig.add_axes([0.02, 0.72, 0.18, 0.18])
+    ax_g.set_xlim(-1.05, 1.05)
+    ax_g.set_ylim(-1.05, 1.05)
+    ax_g.set_aspect("equal")
+    ax_g.axis("off")
 
-    # Draw globe circle
+    # Globe circle (ocean)
     theta = np.linspace(0, 2 * np.pi, 100)
-    ax_globe.fill(np.cos(theta), np.sin(theta), color="#D6EAF8", zorder=0)
-    ax_globe.plot(np.cos(theta), np.sin(theta), color="black", linewidth=0.8, zorder=5)
+    ax_g.fill(np.cos(theta), np.sin(theta), color="#D6EAF8", zorder=0)
+    ax_g.plot(np.cos(theta), np.sin(theta), color="black", linewidth=0.8, zorder=5)
 
-    # Draw land masses from Natural Earth
-    world = _get_natural_earth()
-    if world is not None:
-        for _, country in world.iterrows():
-            geom = country.geometry
-            if geom is None:
-                continue
-            polys = [geom] if geom.geom_type == "Polygon" else list(geom.geoms)
-            for poly in polys:
-                coords = np.array(poly.exterior.coords)
-                projected = [ortho_project(lon, lat, mid_lon, mid_lat)
-                             for lon, lat in coords]
-                # Only draw if most points are on the visible side
-                visible = [p for p in projected if p[2]]
-                if len(visible) < len(projected) * 0.3:
-                    continue
-                xs = [p[0] for p in projected if p[2]]
-                ys = [p[1] for p in projected if p[2]]
-                if len(xs) > 2:
-                    ax_globe.fill(xs, ys, color="#C8D6B9", edgecolor="#555555",
-                                  linewidth=0.3, zorder=1)
+    # Land masses
+    coastlines = _get_coastlines()
+    for lons_seg, lats_seg in coastlines:
+        projected = [ortho(lo, la) for lo, la in zip(lons_seg, lats_seg)]
+        visible = [(p[0], p[1]) for p in projected if p[2]]
+        if len(visible) < 3:
+            continue
+        xs, ys = zip(*visible)
+        ax_g.fill(xs, ys, color="#C8D6B9", edgecolor="#555555",
+                  linewidth=0.3, zorder=1)
 
-    # Draw great-circle path (sample points along the arc)
-    n_pts = 100
-    fracs = np.linspace(0, 1, n_pts)
-    gc_lons = array_lon + fracs * (eq_lon - array_lon)
-    gc_lats = array_lat + fracs * (eq_lat - array_lat)
-    # Spherical interpolation for great circle
-    from math import acos, degrees
+    # Great-circle path
     lat1r, lon1r = radians(array_lat), radians(array_lon)
     lat2r, lon2r = radians(eq_lat), radians(eq_lon)
     d = acos(min(1, max(-1,
         sin(lat1r) * sin(lat2r) + cos(lat1r) * cos(lat2r) * cos(lon2r - lon1r))))
     if d > 0.001:
         gc_xs, gc_ys = [], []
-        for f in fracs:
+        for f in np.linspace(0, 1, 100):
             A = sin((1 - f) * d) / sin(d)
             B = sin(f * d) / sin(d)
             x = A * cos(lat1r) * cos(lon1r) + B * cos(lat2r) * cos(lon2r)
@@ -648,24 +604,24 @@ def add_globe_inset(fig, array_lon, array_lat, eq_lon, eq_lat):
             z = A * sin(lat1r) + B * sin(lat2r)
             lat_i = degrees(np.arctan2(z, np.sqrt(x**2 + y**2)))
             lon_i = degrees(np.arctan2(y, x))
-            px, py, vis = ortho_project(lon_i, lat_i, mid_lon, mid_lat)
+            px, py, vis = ortho(lon_i, lat_i)
             if vis:
                 gc_xs.append(px)
                 gc_ys.append(py)
         if gc_xs:
-            ax_globe.plot(gc_xs, gc_ys, color="black", linewidth=1.0, zorder=3)
+            ax_g.plot(gc_xs, gc_ys, color="black", linewidth=1.0, zorder=3)
 
-    # Plot network (inverted triangle) and epicenter (star)
-    ax, ay, avis = ortho_project(array_lon, array_lat, mid_lon, mid_lat)
-    if avis:
-        ax_globe.plot(ax, ay, marker="v", markersize=8, color="lime",
-                      markeredgecolor="black", markeredgewidth=0.8, zorder=4)
-    ex, ey, evis = ortho_project(eq_lon, eq_lat, mid_lon, mid_lat)
+    # Network (inverted triangle) and epicenter (star)
+    nx, ny, nvis = ortho(array_lon, array_lat)
+    if nvis:
+        ax_g.plot(nx, ny, marker="v", markersize=8, color="lime",
+                  markeredgecolor="black", markeredgewidth=0.8, zorder=4)
+    ex, ey, evis = ortho(eq_lon, eq_lat)
     if evis:
-        ax_globe.plot(ex, ey, marker="*", markersize=10, color="red",
-                      markeredgecolor="black", markeredgewidth=0.5, zorder=4)
+        ax_g.plot(ex, ey, marker="*", markersize=10, color="red",
+                  markeredgecolor="black", markeredgewidth=0.5, zorder=4)
 
-    return ax_globe
+    return ax_g
 
 
 def plot_taupy(dist_deg, depth_km, output_dir="output", event_label=""):
@@ -850,9 +806,6 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     ax_map.set_aspect("equal")
     ax_map.grid(True, linewidth=0.3, alpha=0.5)
 
-    # Add basemap tiles and geographic features
-    add_basemap(ax_map, extent, map_cfg)
-
     # Globe inset (top-left corner)
     add_globe_inset(fig, array_lon, array_lat, eq["longitude"], eq["latitude"])
 
@@ -986,8 +939,12 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     cursor_line = ax_trace.axvline(x=0, color="red", linewidth=1.5, zorder=10)
 
     # ===================== PRE-COMPUTE =====================
+    # Pre-compute RGBA colors for each frame (like original GMV's value_to_color).
+    # This avoids set_array() which can trigger colorbar auto-rescaling.
     print("Pre-computing animation frames...")
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     amplitude_frames = np.zeros((n_frames, len(stations)))
+    color_frames = np.zeros((n_frames, len(stations), 4))  # RGBA
 
     for i, t in enumerate(times):
         for j, sta in enumerate(stations):
@@ -998,6 +955,8 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
             idx = int((t - tr.stats.starttime) * tr.stats.sampling_rate)
             if 0 <= idx < tr.stats.npts:
                 amplitude_frames[i, j] = tr.data[idx]
+        # Convert amplitudes to RGBA colors using the fixed norm
+        color_frames[i] = sm.to_rgba(amplitude_frames[i])
 
     # Add time cursor label on trace panel
     cursor_label = ax_trace.text(
@@ -1012,8 +971,8 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         t = times[frame_idx]
         elapsed = t - origin
 
-        # Update scatter colors
-        scatter.set_array(amplitude_frames[frame_idx])
+        # Update scatter colors using pre-computed RGBA (no auto-rescaling)
+        scatter.set_facecolors(color_frames[frame_idx])
 
         # Format time as HH:MM:SS like original GMV
         abs_elapsed = abs(elapsed)
@@ -1140,9 +1099,6 @@ def create_snapshot(stream, station_info, config, time_offset_s):
     ax.set_ylabel("Latitude (°)", fontsize=9)
     ax.set_aspect("equal")
     ax.grid(True, linewidth=0.3, alpha=0.5)
-
-    # Add basemap tiles and geographic features
-    add_basemap(ax, extent, map_cfg)
 
     # Globe inset
     add_globe_inset(fig, np.mean(lons), np.mean(lats), eq["longitude"], eq["latitude"])
