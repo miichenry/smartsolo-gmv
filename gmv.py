@@ -779,7 +779,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         [eq["latitude"], array_lat],
         color="black", linewidth=1.5, linestyle="-",
         zorder=3,
-        label=f"GC path ({dist_deg:.1f}°)",
+        label=f"Great Circle Path (~ {int(dist_deg * 111.195)} km)",
     )
 
     # Colormap — discretized like original GMV (32 levels)
@@ -803,7 +803,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         marker="v", markersize=9, color="lime",
         markeredgecolor="black", markeredgewidth=1,
         zorder=8,
-        label=f"Ref: SS.{ref_station}",
+        label="Reference Station",
     )
 
     # Static colorbar (drawn once, never updated — like original GMV)
