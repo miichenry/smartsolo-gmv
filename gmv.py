@@ -20,7 +20,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-
 import numpy as np
 import obspy
 import yaml
@@ -488,10 +487,8 @@ def _load_coastlines():
     """
     Load Natural Earth country polygons for globe rendering.
     Returns list of (lons_array, lats_array) polygon segments.
-    Tries multiple sources in order of reliability.
     """
     def _extract_segments(world):
-        """Extract polygon coordinate segments from a GeoDataFrame."""
         segments = []
         for _, row in world.iterrows():
             geom = row.geometry
@@ -508,10 +505,8 @@ def _load_coastlines():
                 segments.append((coords[:, 0], coords[:, 1]))
         return segments
 
-    # Try geopandas with various Natural Earth sources
     try:
         import geopandas as gpd
-        # geopandas >= 1.0: use geodatasets or direct URL
         try:
             world = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
             segs = _extract_segments(world)
@@ -519,7 +514,6 @@ def _load_coastlines():
                 return segs
         except Exception:
             pass
-        # Direct URL fallback
         try:
             world = gpd.read_file(
                 "https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip")
@@ -567,30 +561,21 @@ def add_globe_inset(fig, array_lon, array_lat, eq_lon, eq_lat):
         return x, y, cos_c
 
     def _clip_polygon_to_hemisphere(lons_arr, lats_arr):
-        """
-        Clip a polygon to the visible hemisphere using interpolation at
-        the horizon boundary. Returns list of (x, y) points for the
-        clipped polygon, or empty list.
-        """
+        """Clip a polygon to the visible hemisphere with edge interpolation."""
         n = len(lons_arr)
         if n < 3:
             return []
-        # Project all points
         projected = [ortho(lons_arr[i], lats_arr[i]) for i in range(n)]
-        # Walk edges, interpolate crossings
         clipped = []
         for i in range(n):
             x1, y1, c1 = projected[i]
             x2, y2, c2 = projected[(i + 1) % n]
             if c1 > 0:
                 clipped.append((x1, y1))
-            # Edge crosses the horizon
             if (c1 > 0) != (c2 > 0):
-                # Interpolate to find the crossing point
                 t = c1 / (c1 - c2) if abs(c1 - c2) > 1e-10 else 0.5
                 xi = x1 + t * (x2 - x1)
                 yi = y1 + t * (y2 - y1)
-                # Normalize to unit circle (horizon)
                 r = sqrt(xi**2 + yi**2)
                 if r > 0:
                     xi, yi = xi / r * 0.9999, yi / r * 0.9999
@@ -651,70 +636,6 @@ def add_globe_inset(fig, array_lon, array_lat, eq_lon, eq_lat):
                   markeredgecolor="black", markeredgewidth=0.5, zorder=4)
 
     return ax_g
-
-
-def plot_taupy(dist_deg, depth_km, output_dir="output", event_label=""):
-    """
-    Generate TauPy figures: ray paths and travel time curve.
-
-    Saves two PNG files to output_dir.
-    """
-    from obspy.taup import TauPyModel
-    model = TauPyModel(model="iasp91")
-    phase_list = ["P", "pP", "S", "sS", "SS", "ScS", "PKP", "PKIKP",
-                  "SKS", "PP", "PcP"]
-
-    # get_ray_paths computes full ray geometry (needed for plotting)
-    arrivals = model.get_ray_paths(
-        source_depth_in_km=depth_km,
-        distance_in_degree=dist_deg,
-        phase_list=phase_list,
-    )
-
-    os.makedirs(output_dir, exist_ok=True)
-    safe_label = event_label.replace(" ", "_").replace(",", "")
-
-    # 1. Ray paths through the Earth
-    try:
-        ax_rays = arrivals.plot_rays(plot_type="spherical", legend=True,
-                                     plot_all=True, show=False)
-        fig_rays = ax_rays.figure
-        fig_rays.suptitle(
-            f"TauPy Ray Paths (iasp91)\n"
-            f"{event_label} | Dist={dist_deg:.1f}\u00b0 Depth={depth_km:.0f} km",
-            fontsize=11, fontweight="bold",
-        )
-        ray_path = os.path.join(output_dir, f"taupy_rays_{safe_label}.png")
-        fig_rays.savefig(ray_path, dpi=150, bbox_inches="tight")
-        plt.close(fig_rays)
-        print(f"TauPy ray paths saved to: {ray_path}")
-    except Exception as e:
-        print(f"Warning: Could not plot ray paths: {e}")
-
-    # 2. Travel time curve
-    try:
-        ax_tt = arrivals.plot_times(show=False)
-        fig_tt = ax_tt.figure
-        fig_tt.suptitle(
-            f"TauPy Travel Times (iasp91)\n"
-            f"{event_label} | Dist={dist_deg:.1f}\u00b0 Depth={depth_km:.0f} km",
-            fontsize=11, fontweight="bold",
-        )
-        tt_path = os.path.join(output_dir, f"taupy_times_{safe_label}.png")
-        fig_tt.savefig(tt_path, dpi=150, bbox_inches="tight")
-        plt.close(fig_tt)
-        print(f"TauPy travel times saved to: {tt_path}")
-    except Exception as e:
-        print(f"Warning: Could not plot travel times: {e}")
-
-    # 3. Print arrival table
-    print(f"\nTauPy Arrivals for {event_label} (dist={dist_deg:.1f}°, depth={depth_km:.0f} km):")
-    print(f"  {'Phase':<8} {'Time (s)':>10} {'Time (min)':>10}")
-    print(f"  {'-'*30}")
-    for arr in arrivals:
-        print(f"  {arr.name:<8} {arr.time:>10.1f} {arr.time/60:>10.1f}")
-    r1_time = dist_deg * 28.5
-    print(f"  {'R1':<8} {r1_time:>10.1f} {r1_time/60:>10.1f}  (estimated)")
 
 
 def create_animation(stream, raw_stream, filt_stream, station_info, config):
@@ -838,7 +759,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     # Globe inset (top-left corner)
     add_globe_inset(fig, array_lon, array_lat, eq["longitude"], eq["latitude"])
 
-    # Path from earthquake to array center
+    # Great-circle path from earthquake to array center
     ax_map.plot(
         [eq["longitude"], array_lon],
         [eq["latitude"], array_lat],
@@ -847,22 +768,19 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         label=f"GC path ({dist_deg:.1f}°)",
     )
 
-    # Colormap
+    # Colormap — discretized like original GMV (32 levels)
     mk_cfg = anim_cfg["marker"]
-    cmap = plt.get_cmap(mk_cfg.get("cmap", "bwr"))
-    norm = mcolors.Normalize(vmin=mk_cfg.get("vmin", -1), vmax=mk_cfg.get("vmax", 1))
+    color_levels = 32
+    cmap = plt.get_cmap(mk_cfg.get("cmap", "bwr"), color_levels)
+    vmin = mk_cfg.get("vmin", -1)
+    vmax = mk_cfg.get("vmax", 1)
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+    marker_size_pt = mk_cfg.get("size", 40) * 1.5
 
-    # Station markers (1.5x bigger)
-    marker_size = mk_cfg.get("size", 40) * 1.5
-    scatter = ax_map.scatter(
-        lons, lats,
-        c=np.zeros(len(stations)),
-        cmap=cmap, norm=norm,
-        s=marker_size,
-        alpha=mk_cfg.get("alpha", 0.85),
-        edgecolors="k", linewidths=0.3,
-        zorder=5,
-    )
+    def value_to_color(value):
+        """Convert amplitude to RGBA, clamping to [vmin, vmax]."""
+        value = max(vmin, min(vmax, value))
+        return cmap(norm(value))
 
     # Highlight reference station
     ref_lon, ref_lat = station_info[ref_station]
@@ -874,9 +792,11 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         label=f"Ref: SS.{ref_station}",
     )
 
-    # Colorbar on a separate axis to the right (not overlapping map)
+    # Static colorbar (drawn once, never updated — like original GMV)
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
     cbar_ax = fig.add_axes([0.87, 0.40, 0.02, 0.40])
-    cbar = fig.colorbar(scatter, cax=cbar_ax)
+    cbar = fig.colorbar(sm, cax=cbar_ax)
     cbar.set_label("Normalized Amplitude", fontsize=9)
 
     # Legend on the right side
@@ -968,14 +888,18 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     cursor_line = ax_trace.axvline(x=0, color="red", linewidth=1.5, zorder=10)
 
     # ===================== PRE-COMPUTE =====================
-    # Pre-compute RGBA colors for each frame (like original GMV's value_to_color).
-    # This avoids set_array() which can trigger colorbar auto-rescaling.
+    # Like original GMV: pre-compute amplitude per station per frame,
+    # convert to RGBA color, and group stations by color.
     print("Pre-computing animation frames...")
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    amplitude_frames = np.zeros((n_frames, len(stations)))
-    color_frames = np.zeros((n_frames, len(stations), 4))  # RGBA
+    marker_sqrt = np.sqrt(marker_size_pt)  # matplotlib markersize is in points
+
+    # Pre-compute frames: for each frame, group stations by color
+    # frames_data[i] = {color_rgba: {'x': [...], 'y': [...]}}
+    frames_data = []
+    all_colors = []  # ordered list of unique RGBA tuples
 
     for i, t in enumerate(times):
+        color_groups = {}
         for j, sta in enumerate(stations):
             traces = stream.select(station=sta)
             if len(traces) == 0:
@@ -983,9 +907,28 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
             tr = traces[0]
             idx = int((t - tr.stats.starttime) * tr.stats.sampling_rate)
             if 0 <= idx < tr.stats.npts:
-                amplitude_frames[i, j] = tr.data[idx]
-        # Convert amplitudes to RGBA colors using the fixed norm
-        color_frames[i] = sm.to_rgba(amplitude_frames[i])
+                amp = tr.data[idx]
+            else:
+                amp = 0.0
+            rgba = value_to_color(amp)
+            if rgba not in color_groups:
+                color_groups[rgba] = {'x': [], 'y': []}
+            color_groups[rgba]['x'].append(lons[j])
+            color_groups[rgba]['y'].append(lats[j])
+            if rgba not in all_colors:
+                all_colors.append(rgba)
+        frames_data.append(color_groups)
+
+    # Initialize one plot handle per unique color (like original GMV's set_marker)
+    marker_handles = {}
+    for rgba in all_colors:
+        handle, = ax_map.plot([], [], marker='o', color=rgba,
+                              markersize=marker_sqrt, markeredgewidth=0.3,
+                              markeredgecolor=(0, 0, 0, 1),
+                              linestyle='None', zorder=5)
+        marker_handles[rgba] = handle
+
+    print(f"  {len(all_colors)} unique colors across {n_frames} frames")
 
     # Add time cursor label on trace panel
     cursor_label = ax_trace.text(
@@ -996,12 +939,17 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
     )
 
     def update(frame_idx):
-        """Update function for animation."""
+        """Update function for animation — only moves markers, never changes colors."""
         t = times[frame_idx]
         elapsed = t - origin
 
-        # Update scatter colors using pre-computed RGBA (no auto-rescaling)
-        scatter.set_facecolors(color_frames[frame_idx])
+        # Update marker positions per color group (like original GMV)
+        frame = frames_data[frame_idx]
+        for rgba, handle in marker_handles.items():
+            if rgba in frame:
+                handle.set_data(frame[rgba]['x'], frame[rgba]['y'])
+            else:
+                handle.set_data([], [])
 
         # Format time as HH:MM:SS like original GMV
         abs_elapsed = abs(elapsed)
@@ -1029,14 +977,14 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         print(f"\r  [{bar}] {pct:5.1f}% ({frame_idx+1}/{n_frames}) {ot_str}",
               end="", flush=True)
 
-        return scatter, time_text, cursor_line, cursor_label
+        return list(marker_handles.values()) + [time_text, cursor_line, cursor_label]
 
     print(f"Creating animation with {n_frames} frames...")
     anim = FuncAnimation(
         fig, update,
         frames=n_frames,
         interval=1000 / anim_cfg.get("fps", 15),
-        blit=False,
+        blit=True,
     )
 
     # Save
@@ -1231,21 +1179,6 @@ Examples:
         sys.exit(1)
 
     print(f"Ready: {len(stream)} stations with data")
-
-    # Generate TauPy figures
-    eq = config["earthquake"]
-    anim_cfg = config["animation"]
-    stations = list(station_info.keys())
-    lons = np.array([station_info[s][0] for s in stations])
-    lats = np.array([station_info[s][1] for s in stations])
-    array_lat, array_lon = np.mean(lats), np.mean(lons)
-    dist_deg, _ = compute_distance_azimuth(
-        array_lat, array_lon, eq["latitude"], eq["longitude"]
-    )
-    output_path = anim_cfg.get("output_file", "output/gmv_animation")
-    output_dir = os.path.dirname(output_path) or "output"
-    event_label = f"M{eq['magnitude']}_{eq.get('description', '')[:40]}"
-    plot_taupy(dist_deg, eq["depth_km"], output_dir=output_dir, event_label=event_label)
 
     # Create output
     if args.snapshot is not None:
