@@ -486,19 +486,12 @@ def compute_travel_times(dist_deg, depth_km):
 
 def _load_coastlines():
     """
-    Load Natural Earth coastline coordinates from the shapefile bundled
-    with matplotlib (used by Basemap/cartopy internally).
-    Falls back to a simplified built-in dataset.
+    Load Natural Earth country polygons for globe rendering.
     Returns list of (lons_array, lats_array) polygon segments.
+    Tries multiple sources in order of reliability.
     """
-    try:
-        from matplotlib.collections import LineCollection
-        import json
-        # matplotlib bundles Natural Earth data for its own use
-        import importlib.resources
-        # Try geopandas first (most reliable)
-        import geopandas as gpd
-        world = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
+    def _extract_segments(world):
+        """Extract polygon coordinate segments from a GeoDataFrame."""
         segments = []
         for _, row in world.iterrows():
             geom = row.geometry
@@ -514,25 +507,31 @@ def _load_coastlines():
                 coords = np.array(poly.exterior.coords)
                 segments.append((coords[:, 0], coords[:, 1]))
         return segments
-    except Exception:
-        pass
 
-    # Fallback: try reading NE shapefiles directly via pyshp
+    # Try geopandas with various Natural Earth sources
     try:
-        import shapefile
-        import os
-        ne_path = os.path.join(os.path.dirname(__file__),
-                               "data", "ne_110m_coastline.shp")
-        if os.path.exists(ne_path):
-            sf = shapefile.Reader(ne_path)
-            segments = []
-            for shape in sf.shapes():
-                pts = np.array(shape.points)
-                segments.append((pts[:, 0], pts[:, 1]))
-            return segments
-    except Exception:
+        import geopandas as gpd
+        # geopandas >= 1.0: use geodatasets or direct URL
+        try:
+            world = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
+            segs = _extract_segments(world)
+            if segs:
+                return segs
+        except Exception:
+            pass
+        # Direct URL fallback
+        try:
+            world = gpd.read_file(
+                "https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip")
+            segs = _extract_segments(world)
+            if segs:
+                return segs
+        except Exception:
+            pass
+    except ImportError:
         pass
 
+    print("Warning: geopandas not available, globe will have no land masses")
     return []
 
 
@@ -549,23 +548,54 @@ def _get_coastlines():
 
 def add_globe_inset(fig, array_lon, array_lat, eq_lon, eq_lat):
     """
-    Add a small orthographic globe inset with Wikipedia-style land masses,
-    the network as an inverted triangle, the epicenter as a star,
-    and the great-circle path.
+    Add a small orthographic globe inset with Wikipedia-style filled land,
+    country borders, the network as an inverted triangle, the epicenter
+    as a star, and the great-circle path.
     """
-    from math import radians, cos, sin, acos, degrees
+    from math import radians, cos, sin, acos, degrees, atan2, sqrt
 
     mid_lon = (array_lon + eq_lon) / 2
     mid_lat = (array_lat + eq_lat) / 2
+    lo0, la0 = radians(mid_lon), radians(mid_lat)
 
     def ortho(lon, lat):
-        """Orthographic projection centered on mid_lon/mid_lat. Returns (x, y, visible)."""
+        """Orthographic projection. Returns (x, y, cos_c)."""
         lo, la = radians(lon), radians(lat)
-        lo0, la0 = radians(mid_lon), radians(mid_lat)
         x = cos(la) * sin(lo - lo0)
         y = cos(la0) * sin(la) - sin(la0) * cos(la) * cos(lo - lo0)
         cos_c = sin(la0) * sin(la) + cos(la0) * cos(la) * cos(lo - lo0)
-        return x, y, cos_c > 0
+        return x, y, cos_c
+
+    def _clip_polygon_to_hemisphere(lons_arr, lats_arr):
+        """
+        Clip a polygon to the visible hemisphere using interpolation at
+        the horizon boundary. Returns list of (x, y) points for the
+        clipped polygon, or empty list.
+        """
+        n = len(lons_arr)
+        if n < 3:
+            return []
+        # Project all points
+        projected = [ortho(lons_arr[i], lats_arr[i]) for i in range(n)]
+        # Walk edges, interpolate crossings
+        clipped = []
+        for i in range(n):
+            x1, y1, c1 = projected[i]
+            x2, y2, c2 = projected[(i + 1) % n]
+            if c1 > 0:
+                clipped.append((x1, y1))
+            # Edge crosses the horizon
+            if (c1 > 0) != (c2 > 0):
+                # Interpolate to find the crossing point
+                t = c1 / (c1 - c2) if abs(c1 - c2) > 1e-10 else 0.5
+                xi = x1 + t * (x2 - x1)
+                yi = y1 + t * (y2 - y1)
+                # Normalize to unit circle (horizon)
+                r = sqrt(xi**2 + yi**2)
+                if r > 0:
+                    xi, yi = xi / r * 0.9999, yi / r * 0.9999
+                clipped.append((xi, yi))
+        return clipped
 
     ax_g = fig.add_axes([0.02, 0.72, 0.18, 0.18])
     ax_g.set_xlim(-1.05, 1.05)
@@ -574,18 +604,17 @@ def add_globe_inset(fig, array_lon, array_lat, eq_lon, eq_lat):
     ax_g.axis("off")
 
     # Globe circle (ocean)
-    theta = np.linspace(0, 2 * np.pi, 100)
+    theta = np.linspace(0, 2 * np.pi, 200)
     ax_g.fill(np.cos(theta), np.sin(theta), color="#D6EAF8", zorder=0)
     ax_g.plot(np.cos(theta), np.sin(theta), color="black", linewidth=0.8, zorder=5)
 
-    # Land masses
+    # Land masses with proper clipping
     coastlines = _get_coastlines()
     for lons_seg, lats_seg in coastlines:
-        projected = [ortho(lo, la) for lo, la in zip(lons_seg, lats_seg)]
-        visible = [(p[0], p[1]) for p in projected if p[2]]
-        if len(visible) < 3:
+        clipped = _clip_polygon_to_hemisphere(lons_seg, lats_seg)
+        if len(clipped) < 3:
             continue
-        xs, ys = zip(*visible)
+        xs, ys = zip(*clipped)
         ax_g.fill(xs, ys, color="#C8D6B9", edgecolor="#555555",
                   linewidth=0.3, zorder=1)
 
@@ -602,22 +631,22 @@ def add_globe_inset(fig, array_lon, array_lat, eq_lon, eq_lat):
             x = A * cos(lat1r) * cos(lon1r) + B * cos(lat2r) * cos(lon2r)
             y = A * cos(lat1r) * sin(lon1r) + B * cos(lat2r) * sin(lon2r)
             z = A * sin(lat1r) + B * sin(lat2r)
-            lat_i = degrees(np.arctan2(z, np.sqrt(x**2 + y**2)))
-            lon_i = degrees(np.arctan2(y, x))
-            px, py, vis = ortho(lon_i, lat_i)
-            if vis:
+            lat_i = degrees(atan2(z, sqrt(x**2 + y**2)))
+            lon_i = degrees(atan2(y, x))
+            px, py, cos_c = ortho(lon_i, lat_i)
+            if cos_c > 0:
                 gc_xs.append(px)
                 gc_ys.append(py)
         if gc_xs:
             ax_g.plot(gc_xs, gc_ys, color="black", linewidth=1.0, zorder=3)
 
     # Network (inverted triangle) and epicenter (star)
-    nx, ny, nvis = ortho(array_lon, array_lat)
-    if nvis:
+    nx, ny, nc = ortho(array_lon, array_lat)
+    if nc > 0:
         ax_g.plot(nx, ny, marker="v", markersize=8, color="lime",
                   markeredgecolor="black", markeredgewidth=0.8, zorder=4)
-    ex, ey, evis = ortho(eq_lon, eq_lat)
-    if evis:
+    ex, ey, ec = ortho(eq_lon, eq_lat)
+    if ec > 0:
         ax_g.plot(ex, ey, marker="*", markersize=10, color="red",
                   markeredgecolor="black", markeredgewidth=0.5, zorder=4)
 
@@ -1007,7 +1036,7 @@ def create_animation(stream, raw_stream, filt_stream, station_info, config):
         fig, update,
         frames=n_frames,
         interval=1000 / anim_cfg.get("fps", 15),
-        blit=True,
+        blit=False,
     )
 
     # Save
